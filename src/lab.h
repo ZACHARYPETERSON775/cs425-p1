@@ -219,13 +219,22 @@ int smtp_rcpt_to(SMTP smtp);
 /** * @brief Generate DATA message.
  *
  * This function generates the DATA message string and sends it to the server.
- * The string is allocated using asprintf and should be freed by the caller.
  * The string is printed to the SMTP handles out file descriptor.
  * @param smtp SMTP handle.
  * @return On success, returns number of bytes writen.
  * @return On error, returns -1.
  */
 int smtp_data_start(SMTP smtp);
+
+/** * @brief Generate and send SMTP subject line.
+ *
+ * This function generate the subject line string and sends it to the server.
+ * The string is printed to the SMTP handles out file descriptor.
+ * @param smtp SMTP handle
+ * @return On success, returns number of bytes writen.
+ * @return On error, returns -1.
+*/
+int smtp_subject(SMTP smtp);
 
 /** * @brief Generate a DATA BODY message.
  *

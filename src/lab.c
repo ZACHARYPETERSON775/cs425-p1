@@ -462,6 +462,32 @@ int smtp_data_start(SMTP smtp) {
    return ret;
 }
 
+int smtp_subject(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if(ref->subject == NULL) {
+      return 0; // No subject line
+   }
+   char* line;
+   char* san;
+   if((san = smtp_sanitize(ref->subject)) == NULL) {
+      return -1;
+   }
+   if (asprintf(&line, "Subject: %s%s", san, CRLF) == -1) {
+      return -1;
+   }
+   if(ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(san);
+   free(line);
+   return ret;
+}
+
 int smtp_data_body(SMTP smtp) {
    errno = 0;
    if (smtp == NULL) {
@@ -595,6 +621,9 @@ int smtp_send_email(SMTP smtp) {
       return -1;
    }
    if (smtp_listen(smtp, "354")) {
+      return -1;
+   }
+   if (smtp_subject(smtp) == -1) { // SUBJECT LINE
       return -1;
    }
    if (smtp_data_body(smtp) == -1) { // DATA BODY
