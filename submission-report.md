@@ -1,6 +1,6 @@
 # Submission Report
 
-- Submission generated at 09/21/2026 at 05:59:08
+- Submission generated at 09/21/2026 at 19:25:04
 
 - Machine info: Linux runnervmlun5p 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
 
@@ -220,9 +220,9 @@ Directory: .
 ------------------------------------------------------------------------------
 File                                       Lines     Exec  Cover   Missing
 ------------------------------------------------------------------------------
-src/lab.c                                    373       88    23%   87,92-94,100,105-107,113,159,167,170,175,178,183,186,191,194,199,202,207,210,213-214,218,220,222,225,229,233-234,238,242,247-268,272-275,277-279,281,284-287,289-291,293-295,298-301,303-305,307,310-313,315-317,319,322-324,326-329,332-334,337-338,342-346,348-349,352-354,356-357,359-361,364-367,369-371,374,376,378-379,381-382,384,386-388,390,393-396,398,400-401,403-404,406-408,411-414,416,418-419,421-422,424-426,429-432,434,436-437,439-440,442-444,447-450,452,454-455,457-458,460-462,465-468,470,472-477,479-482,484-486,488,490,493-496,498,500-501,503-504,506-508,511-514,516,518-519,521-522,524-526,529-533,535,538-540,542,545-547,549,552-557,559-561,563-566,569-571,573-574,576-577,579-580,582-583,585-586,588-589,591-592,594-595,597-598,600-601,603-604,606-607,609-610,612-613,615
+src/lab.c                                    392       88    22%   87,92-94,100,105-107,113,159,167,170,175,178,183,186,191,194,199,202,207,210,213-214,218,220,222,225,229,233-234,238,242,247-268,272-275,277-279,281,284-287,289-291,293-295,298-301,303-305,307,310-313,315-317,319,322-324,326-329,332-334,337-338,342-346,348-349,352-354,356-357,359-361,364-367,369-371,374,376,378-379,381-382,384,386-388,390,393-396,398,400-401,403-404,406-408,411-414,416,418-419,421-422,424-426,429-432,434,436-437,439-440,442-444,447-450,452,454-455,457-458,460-462,465-468,470-472,476-477,479-480,482-483,485-488,491-494,496,498-503,505-508,510-512,514,516,519-522,524,526-527,529-530,532-534,537-540,542,544-545,547-548,550-552,555-559,561,564-566,568,571-573,575,578-583,585-587,589-592,595-597,599-600,602-603,605-606,608-609,611-612,614-615,617-618,620-621,623-624,626-627,629-630,632-633,635-636,638-639,641-642,644
 ------------------------------------------------------------------------------
-TOTAL                                        373       88    23%
+TOTAL                                        392       88    22%
 ------------------------------------------------------------------------------
 ```
 
@@ -731,6 +731,32 @@ int smtp_data_start(SMTP smtp) {
    return ret;
 }
 
+int smtp_subject(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if(ref->subject == NULL) {
+      return 0; // No subject line
+   }
+   char* line;
+   char* san;
+   if((san = smtp_sanitize(ref->subject)) == NULL) {
+      return -1;
+   }
+   if (asprintf(&line, "Subject: %s%s", san, CRLF) == -1) {
+      return -1;
+   }
+   if(ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(san);
+   free(line);
+   return ret;
+}
+
 int smtp_data_body(SMTP smtp) {
    errno = 0;
    if (smtp == NULL) {
@@ -864,6 +890,9 @@ int smtp_send_email(SMTP smtp) {
       return -1;
    }
    if (smtp_listen(smtp, "354")) {
+      return -1;
+   }
+   if (smtp_subject(smtp) == -1) { // SUBJECT LINE
       return -1;
    }
    if (smtp_data_body(smtp) == -1) { // DATA BODY
@@ -1111,13 +1140,22 @@ int smtp_rcpt_to(SMTP smtp);
 /** * @brief Generate DATA message.
  *
  * This function generates the DATA message string and sends it to the server.
- * The string is allocated using asprintf and should be freed by the caller.
  * The string is printed to the SMTP handles out file descriptor.
  * @param smtp SMTP handle.
  * @return On success, returns number of bytes writen.
  * @return On error, returns -1.
  */
 int smtp_data_start(SMTP smtp);
+
+/** * @brief Generate and send SMTP subject line.
+ *
+ * This function generate the subject line string and sends it to the server.
+ * The string is printed to the SMTP handles out file descriptor.
+ * @param smtp SMTP handle
+ * @return On success, returns number of bytes writen.
+ * @return On error, returns -1.
+*/
+int smtp_subject(SMTP smtp);
 
 /** * @brief Generate a DATA BODY message.
  *
@@ -1342,14 +1380,14 @@ int main(void) {
 ```
 
 ## Scripts Files
-Report generated on 09/21/2026 at 05:59:09
+Report generated on 09/21/2026 at 19:25:05
 
 
 ---
 
 ## End of Report
 
-SHA-256 Hash of the report: 79e4aa0cbff1b0162d3c84fa8e6a3253cc7df9370949c8c4ceda048af5cc20c8
+SHA-256 Hash of the report: b88368fe8be175f8f6efd8390c94e2e98ef864caee4a36dcc2176f2a6412aad7
 
 Do not edit the generated report. Any changes will be reported as academic dishonesty
 
