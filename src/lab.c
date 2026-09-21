@@ -1,6 +1,7 @@
 #define _GNU_SOURCE // Needed for addrinfo struct
 #include "lab.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <getopt.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -13,8 +14,9 @@
 /* SMTP message terminator */
 const char* CRLF = "\r\n";
 
-enum error_code {
+enum SMTP_ERROR_CODE {
    NO_ERROR,
+   NULL_PTR,
    DUP_FLAG,
    MEM_ERROR,
    BAD_PORT,
@@ -25,10 +27,229 @@ enum error_code {
    EXTRA_FLAGS
 };
 
-char* get_error_str(int error_code) {
-   switch (error_code) {
+/* SMTP message contents*/
+typedef struct SMTP {
+   open_func open; // Function used to open a connection
+   close_func close; // Function used to close a connection
+   read_func read; // Funciton used to read from the server
+   write_func write; // Function used to write to server
+   FILE* out; // Output file descriptor
+   FILE* err; // Error file descriptor
+   int sfd; // Server file descriptor
+   char* from; // Sender
+   char* to; // Recipient
+   char* subject; // Subject line
+   char* body; // Message body
+   int port; // Server port
+   char* helo_host; // Client address
+   char* server; // Server address
+}* SMTP_ref;
+
+SMTP smtp_init(open_func open, close_func close, read_func read, write_func write, FILE* out, FILE* err) {
+   SMTP_ref ref = (SMTP_ref)malloc(sizeof(struct SMTP));
+   if (ref == NULL) { // GCOVR_EXCL_START
+      return NULL; // malloc failed
+   }// GCOVR_EXCL_STOP
+   ref->open = open ? open : smtp_open;
+   ref->close = close ? close : smtp_close;
+   ref->read = read ? read : smtp_read;
+   ref->write = write ? write : smtp_write;
+   ref->out = out;
+   ref->err = err;
+   ref->from = 0;
+   ref->to = 0;
+   ref->subject = 0;
+   ref->body = 0;
+   ref->port = 0;
+   ref->helo_host = 0;
+   ref->server = 0;
+   return ref;
+}
+
+void smtp_free(SMTP smtp) {
+   SMTP_ref ref = smtp;
+   free(ref->from);
+   free(ref->to);
+   free(ref->subject);
+   free(ref->body);
+   free(ref->helo_host);
+   free(ref->server);
+   ref->from = 0;
+   ref->to = 0;
+   ref->subject = 0;
+   ref->body = 0;
+   ref->port = 0;
+   ref->helo_host = 0;
+   ref->server = 0;
+   free(smtp);
+}
+
+int smtp_open(const char* host, int port) {
+   int error_code;
+   int sfd;
+   struct sockaddr_in* saddr;
+   struct addrinfo hints, *res, *rp;
+   memset(&hints, 0, sizeof(struct addrinfo));
+   hints.ai_family = AF_INET;
+   hints.ai_socktype = SOCK_STREAM;
+   /* Get list of hosts */
+   if ((error_code = getaddrinfo(host, 0, &hints, &res))) { // GCOVR_EXCL_START
+      return error_code;
+   } // GCOVR_EXCL_STOP
+   /* Attempt to connect to hosts */
+   for (rp = res; rp != NULL; rp = rp->ai_next) {
+      /* Failed to create socket */
+      if ((sfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) { // GCOVR_EXCL_START
+         continue;
+      } // GCOVR_EXCL_STOP
+      saddr = (struct sockaddr_in*)rp->ai_addr;
+      saddr->sin_port = htons((uint16_t)(port));
+      errno = 0;
+      if (connect(sfd, (struct sockaddr*)saddr, sizeof(struct sockaddr_in)) != -1) { // GCOVR_EXCL_START
+         break;
+      }
+      close(sfd);
+   } // GCOVR_EXCL_STOP
+   freeaddrinfo(res); /* Cleanup */
+   /* Confirm connection */
+   if (rp == 0) { // GCOVR_EXCL_START
+      return -1;
+   }
+   return sfd;
+} // GCOVR_EXCL_STOP
+
+int smtp_close(int fd) { // GCOVR_EXCL_START
+   errno = 0;
+   return close(fd);
+} // GCOVR_EXCL_STOP
+
+ssize_t smtp_read(int fd, void* buffer, size_t length) { // GCOVR_EXCL_START
+   errno = 0;
+   return recv(fd, buffer, length, 0);
+} // GCOVR_EXCL_STOP
+
+ssize_t smtp_write(int fd, const void* buffer, size_t length) { // GCOVR_EXCL_START
+   errno = 0;
+   return send(fd, buffer, length, 0);
+} // GCOVR_EXCL_STOP
+
+int smtp_print_usage(SMTP smtp) {
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if (ref == NULL) {
+      return -1;
+   }
+   if (ref->out == NULL) {
+      return -1;
+   }
+   errno = 0;
+   fputs("Usage: myapp -f <from> -t <to> [-s subject] [-b body] [-p port]\n", ref->out);
+   fputs("          [-H helo-host] <server>\n", ref->out);
+   fputs("   -f <from>       envelope sender, for example you@example.com\n", ref->out);
+   fputs("   -t <to>         envelope recipient\n", ref->out);
+   fputs("   -s <subject>    subject line (default: empty)\n", ref->out);
+   fputs("   -b <body>       message body (default: read from stdin)\n", ref->out);
+   fputs("   -p <port>       port or service name (default: 25)\n", ref->out);
+   fputs("   -H <helo-host>  host name sent with HELO (default: localhost)\n", ref->out);
+   fputs("   <server>        host name or address of the mail server\n", ref->out);
+   return 0;
+}
+
+int smtp_get_opts(SMTP smtp, int argc, char** argv) {
+   if (smtp == NULL) {
+      return NULL_PTR;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   int arg;
+   while ((arg = getopt(argc, argv, "f:t:-s:-b:-p:-H:")) != -1) {
+      switch (arg) {
+      case 'f':
+         if (ref->from) {
+            return DUP_FLAG;
+         }
+         if ((ref->from = strdup(optarg)) == 0) {
+            return MEM_ERROR;
+         }
+         break;
+      case 't':
+         if (ref->to) {
+            return DUP_FLAG;
+         }
+         if ((ref->to = strdup(optarg)) == 0) {
+            return MEM_ERROR;
+         }
+         break;
+      case 's':
+         if (ref->subject) {
+            return DUP_FLAG;
+         }
+         if ((ref->subject = strdup(optarg)) == 0) {
+            return MEM_ERROR;
+         }
+         break;
+      case 'b':
+         if (ref->body) {
+            return DUP_FLAG;
+         }
+         if ((ref->body = strdup(optarg)) == 0) {
+            return MEM_ERROR;
+         }
+         break;
+      case 'p':
+         if (ref->port) {
+            return DUP_FLAG;
+         }
+         if ((ref->port = atoi(optarg)) == 0) {
+            return BAD_PORT;
+         }
+         break;
+      case 'H':
+         if (ref->helo_host) {
+            return DUP_FLAG;
+         }
+         if ((ref->helo_host = strdup(optarg)) == 0) {
+            return MEM_ERROR;
+         }
+         break;
+      default:
+         return UNKNOWN_FLAG;
+      }
+   }
+   if (ref->from == 0) {
+      return MISSING_FROM;
+   } else if (ref->to == 0) {
+      return MISSING_TO;
+   } else if (optind >= argc) {
+      return MISSING_SERVER;
+   } else {
+      if ((ref->server = strdup(argv[optind++])) == NULL) {
+         return MEM_ERROR;
+      }
+   }
+   if (optind < argc) {
+      return EXTRA_FLAGS;
+   }
+   /* SET DEFAULTS*/
+   if (ref->helo_host == 0) {
+      if ((ref->helo_host = strdup("localhost")) == NULL) {
+         return MEM_ERROR;
+      }
+   }
+   if (ref->port == 0) {
+      ref->port = 25;
+   }
+   /* Read from stdin if body is not set */
+   if (ref->body == 0) {
+      scanf("%m[^EOF]", &ref->body);
+   }
+   return 0;
+}
+
+char* smtp_error(int error) {
+   switch (error) {
    case NO_ERROR:
       return "no error";
+   case NULL_PTR:
+      return "Null ptr";
    case DUP_FLAG:
       return "duplicate flag";
    case MEM_ERROR:
@@ -48,403 +269,348 @@ char* get_error_str(int error_code) {
    }
 }
 
-void smtp_message_init(struct smtp_email* opts) {
-   opts->from = 0;
-   opts->to = 0;
-   opts->subject = 0;
-   opts->body = 0;
-   opts->port = 0;
-   opts->helo_host = 0;
-   opts->server = 0;
-}
-
-void smtp_email_cleanup(struct smtp_email* msg) {
-   free(msg->from);
-   free(msg->to);
-   free(msg->subject);
-   free(msg->body);
-   free(msg->helo_host);
-   free(msg->server);
-   memset(msg, 0, sizeof(*msg));
-}
-
-int print_usage() {
-   return puts("Usage: myapp -f <from> -t <to> [-s subject] [-b body] [-p port]") == EOF || puts("          [-H helo-host] <server>") == EOF || puts("") == EOF || puts("   -f <from>       envelope sender, for example you@example.com") == EOF || puts("   -t <to>         envelope recipient") == EOF || puts("   -s <subject>    subject line (default: empty)") == EOF || puts("  -b <body>       message body (default: read from stdin)") == EOF || puts("   -p <port>       port or service name (default: 25)") == EOF || puts("   -H <helo-host>  host name sent with HELO (default: localhost)") == EOF || puts("   <server>        host name or address of the mail server") == EOF;
-}
-
-int parse_cli(int argc, char** argv, struct smtp_email* opts) {
-   int arg;
-   while ((arg = getopt(argc, argv, "f:t:-s:-b:-p:-H:")) != -1) {
-      switch (arg) {
-      case 'f':
-         if (opts->from) {
-            return DUP_FLAG;
-         }
-         if ((opts->from = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 't':
-         if (opts->to) {
-            return DUP_FLAG;
-         }
-         if ((opts->to = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 's':
-         if (opts->subject) {
-            return DUP_FLAG;
-         }
-         if ((opts->subject = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 'b':
-         if (opts->body) {
-            return DUP_FLAG;
-         }
-         if ((opts->body = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 'p':
-         if (opts->port) {
-            return DUP_FLAG;
-         }
-         if ((opts->port = atoi(optarg)) == 0) {
-            return BAD_PORT;
-         }
-         break;
-      case 'H':
-         if (opts->helo_host) {
-            return DUP_FLAG;
-         }
-         if ((opts->helo_host = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      default:
-         return UNKNOWN_FLAG;
-      }
+int smtp_connect(SMTP smtp) {
+   errno = 0;
+   if (smtp == 0) {
+      return NULL_PTR;
    }
-   if (opts->from == 0) {
-      return MISSING_FROM;
-   } else if (opts->to == 0) {
-      return MISSING_TO;
-   } else if (optind >= argc) {
-      return MISSING_SERVER;
-   } else {
-      if ((opts->server = strdup(argv[optind++])) == NULL) {
-         return MEM_ERROR;
-      }
-   }
-   if (optind < argc) {
-      return EXTRA_FLAGS;
-   }
-   /* SET DEFAULTS*/
-   if (opts->helo_host == 0) {
-      if ((opts->helo_host = strdup("localhost")) == NULL) {
-         return MEM_ERROR;
-      }
-   }
-   if (opts->port == 0) {
-      opts->port = 25;
-   }
-   /* Read from stdin if body is not set */
-   if (opts->body == 0) {
-      scanf("%m[^EOF]", &opts->body);
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if ((ref->sfd = ref->open(ref->server, ref->port)) == -1) {
+      return -1;
    }
    return 0;
 }
 
+int smtp_disconnect(SMTP smtp) {
+   errno = 0;
+   if (smtp == 0) {
+      return NULL_PTR;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if (ref->sfd == 0) {
+      return -1;
+   }
+   int ret = ref->close(ref->sfd);
+   ref->sfd = 0;
+   return ret;
+}
+
+ssize_t smtp_send(SMTP smtp, void* buffer, size_t length) {
+   errno = 0;
+   if (smtp == 0) {
+      return NULL_PTR;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if (ref->sfd == 0) {
+      return -1;
+   }
+   return ref->write(ref->sfd, buffer, length);
+}
+
+ssize_t smtp_recv(SMTP smtp, void* buffer, size_t length) {
+   errno = 0;
+   if (smtp == 0) {
+      return NULL_PTR;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   if (ref->sfd == 0) {
+      return -1;
+   }
+   return ref->read(ref->sfd, buffer, length);
+}
+
+int smtp_read_line(SMTP smtp, char** line) {
+   if (smtp == NULL) {
+      return -1;
+   }
+   size_t buffer_size = 1024; // Size of buffer
+   char buffer[buffer_size]; // Storage buffer
+   int bytes_read = 0; // Number of bytes read
+   int line_length = 0; // Number of bytes in out
+   do {
+      /* Read message from smtp server */
+      bytes_read = (int)smtp_recv(smtp, buffer, buffer_size);
+      if (bytes_read == -1) {
+         return -1; // Read failed
+      }
+      /* Allocate string with null terminator */
+      size_t line_size = (size_t)(line_length + bytes_read + 1); // Number of allocated bytes
+      char* ptr = (char*)realloc(*line, line_size);
+      if (ptr == NULL) { // GCOVR_EXCL_START
+         return -1; // realloc failed
+      } // GCOVR_EXCL_STOP
+      *line = ptr;
+      char* line_end = *line + line_length;
+      memcpy(line_end, buffer, (size_t)bytes_read); // Append buffer
+      line_length += bytes_read;
+      ptr[line_length] = 0;
+      /* Check for CRLF message ending */
+   } while (strstr(*line, CRLF) == NULL);
+   return line_length;
+}
+
+int smtp_write_line(SMTP smtp, char* line) {
+   if (smtp == NULL) {
+      return -1;
+   }
+   if (line == 0) {
+      return -1; // Their is no message to send
+   }
+   int total_written = 0; // Total number of bytes written
+   int bytes_written = 0; // Number of bytes written
+   int line_length = (int)strlen(line); // Size of message to send
+   do {
+      /* Attemp to send message, message may need multiple writes. */
+      char* ptr = line + total_written;
+      size_t bytes_to_write = (size_t)(line_length - total_written);
+      if ((bytes_written = (int)smtp_send(smtp, ptr, bytes_to_write)) == -1) {
+         return -1;
+      }
+      total_written += bytes_written;
+   } while (total_written < line_length);
+   return total_written;
+}
+
 char* smtp_sanitize(char* msg) {
    char* san; // Dotted string
-   int len = strlen(msg);
-   int dotted = msg[0] == '.';
    char* crlf = strstr(msg, CRLF);
-   int ret = 0;
-   if(crlf != 0) {
+   int ret;
+   if (crlf != 0) {
       return 0; // string contain CRLF
    }
-   if (dotted) {
+   if (msg[0] == '.') {
       ret = asprintf(&san, ".%s%s", msg, CRLF);
    } else {
       ret = asprintf(&san, "%s%s", msg, CRLF);
    }
-   if(ret == -1) {
+   if (ret == -1) {
       free(san); // malloc failed
       return 0;
    }
    return san;
 }
 
-int check_status(char* line, char* status) {
-   int line_len = strlen(line);
-   int status_len = strlen(status);
-   if(line_len == 0 || status_len == 0 || line_len < status_len) {
-      return -1; // line cannot start with status
-   }
-   return strncmp(line, status, status_len);
-}
-
-int is_multi_line(char* line) {
-   if(strlen(line) >= 4) {
-      return line[3] == '-'; // SMTP: 4th character is `-` indicates multi line
-   }
-   return 0;
-}
-
-int smtp_connect(const char* address, int port, char** error) {
-   int error_code;
-   int client;
-   struct sockaddr_in* saddr;
-   struct addrinfo hints, *res, *rp;
-   memset(&hints, 0, sizeof(struct addrinfo));
-   hints.ai_family = AF_INET;
-   hints.ai_socktype = SOCK_STREAM;
-
-   error_code = getaddrinfo(address, 0, &hints, &res);
-   if (error_code) {
-      if (error) {
-         asprintf(error, "Get Address Info: %s", gai_strerror(error_code));
-      }
+int smtp_helo(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
       return -1;
    }
-
-   for (rp = res; rp != NULL; rp = rp->ai_next) {
-      if ((client = socket(AF_INET, SOCK_STREAM, 0)) == -1) { /* Failed to create socket */
-         continue;
-      }
-      saddr = (struct sockaddr_in*)rp->ai_addr;
-      saddr->sin_port = htons(port);
-      if (connect(client, (struct sockaddr*)saddr, sizeof(struct sockaddr_in)) != -1) {
-         break;
-      }
-      close(client);
-   }
-   freeaddrinfo(res); /* Cleanup */
-   /* Confirm connection */
-   if (rp == 0) {
-      if (error) {
-         *error = strdup("Could not connect to mail server");
-      }
-      return -2;
-   }
-   return client;
-}
-
-ssize_t smtp_recv(int socket, void* buffer, size_t length) {
-   return recv(socket, buffer, length, 0);
-}
-
-ssize_t smtp_send(int socket, void* buffer, size_t length) {
-   return send(socket, buffer, length, 0);
-}
-
-size_t smtp_read_line(int fd, read_func rf, char** response) {
-   int buffer_size = 1024; // Size of buffer
-   char buffer[buffer_size]; // Storage buffer
-   size_t ret = 0; // Number of bytes read
-   size_t size = 0; // Number of bytes in out
-   do {
-      /* Read message from smtp server */
-      if ((ret = rf(fd, buffer, buffer_size)) == -1) {
-         return -1; // Read failed
-      }
-      /* Allocate string with null terminator */
-      char* ptr = (char*)realloc(*response, ret + size + 1);
-      if (ptr == NULL) { // GCOVR_EXCL_START
-         return -1; // realloc failed
-      } // GCOVR_EXCL_STOP
-      memcpy(ptr + size, buffer, ret); // Append buffer
-      size += ret;
-      ptr[size] = 0;
-      *response = ptr;
-      /* Check for \r\n message ending */
-   } while (strstr(*response, CRLF) == NULL);
-   return size;
-}
-
-size_t smtp_send_line(int fd, write_func wf, char* msg) {
-   int total =  0; // Total number of bytes written
-   int ret = 0; // Number of bytes written
-   if(msg == 0) {
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char* line;
+   if (asprintf(&line, "HELO %s%s", ref->helo_host, CRLF) == -1) {
       return -1;
    }
-   size_t len = strlen(msg); // Size of message to send
-   do {
-      /* Attemp to send message, message may need multiple writes. */
-      if ((ret = wf(fd, msg + total, len - total)) == -1) {
-         total = -1;
-         break;
+   if (ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int smtp_mail_from(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char* line;
+   if (asprintf(&line, "MAIL FROM:<%s>%s", ref->from, CRLF) == -1) {
+      return -1;
+   }
+   if (ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int smtp_rcpt_to(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char* line;
+   if (asprintf(&line, "RCPT TO:<%s>%s", ref->to, CRLF) == -1) {
+      return -1;
+   }
+   if (ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int smtp_data_start(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char* line;
+   if (asprintf(&line, "DATA%s", CRLF) == -1) {
+      return -1;
+   }
+   if (ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int smtp_data_body(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char *line, *san;
+   int total = 0;
+   line = strtok(ref->body, CRLF);
+   while (line != NULL) {
+      san = smtp_sanitize(line);
+      if (san == NULL) {
+         return -1;
+      }
+      int ret = smtp_write_line(smtp, line);
+      if (ret == -1) {
+         free(san);
+         return -1;
       }
       total += ret;
-   } while (total < len);
+      if (ref->out) {
+         fprintf(ref->out, "C: %s", san);
+      }
+      line = strtok(NULL, CRLF);
+   }
    return total;
 }
 
-int smtp_helo(int fd, write_func wf, char* host, char** msg) {
-   int ret;
-   if ((ret = asprintf(msg, "HELO %s", host)) != -1) {
-      char* san = smtp_sanitize(*msg);
-      ret = smtp_send_line(fd, wf, san);
-      free(san);
-   }
-   return ret;
-}
-
-int smtp_mail_from(int fd, write_func wf, char* sndr, char** msg) {
-   int ret;
-   if ((ret = asprintf(msg, "MAIL FROM:<%s>", sndr)) != -1){
-      char* san = smtp_sanitize(*msg);
-      ret = smtp_send_line(fd, wf, san);
-      free(san);
-   }
-   return ret;
-}
-
-int smtp_rcpt_to(int fd, write_func wf, char* rcpt, char** msg) {
-   int ret;
-   if ((ret = asprintf(msg, "RCPT TO:<%s>", rcpt)) != -1) {
-      char* san = smtp_sanitize(*msg);
-      ret = smtp_send_line(fd, wf, san);
-      free(san);
-   }
-   return ret;
-}
-
-int smtp_data(int fd, write_func wf, char** msg) {
-   int ret;
-   *msg = strdup("DATA");
-   if (msg == 0) {
+int smtp_data_end(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
       return -1;
    }
-   char* san = smtp_sanitize(*msg);
-   ret = smtp_send_line(fd, wf, *msg);
-   free(san);
-   return ret;
-}
-
-int smtp_data_body(int fd, write_func wf, char* body, char** msg) {
-   int len = 0;
-   int ret = 0;
-   char *line, *save_ptr;
-   line = strtok_r(body, CRLF, &save_ptr);
-   while(line != 0){
-      char* san = smtp_sanitize(line);
-      if ((ret = smtp_send_line(fd, wf, san)) == -1) {
-         free(san);
-         break;
-      }
-      free(san);
-      char* ptr;
-      if (*msg == 0) {
-         asprintf(&ptr, "C: %s", line);
-      } else {
-         asprintf(&ptr, "%s\nC: %s", *msg, line);
-      }
-      free(*msg);
-      *msg = ptr;
-      line = strtok_r(0, CRLF, &save_ptr);
-   }
-   if(ret != -1) {
-      ret = smtp_send_line(fd, wf, ".\r\n");
-      char* ptr;
-      asprintf(&ptr, "%s\nC: .", *msg);
-      free(*msg);
-      *msg = ptr;
-   }
-   return ret;
-}
-
-int smtp_quit(int fd, write_func wf, char** msg) {
-   *msg = strdup("DATA");
-   if (msg) {
-      return -1;
-   }
-   return smtp_send_line(fd, wf, "QUIT");
-}
-
-int smtp_listen(int fd, read_func rf, char* status_code, char** msg) {
-   int ret = 0;
+   SMTP_ref ref = (SMTP_ref)smtp;
    char* line;
-   /* Get message */
-   if ((ret = smtp_read_line(fd, rf, msg)) == -1) {
-      return 0;
-   }
-   /* Check status code */
-   if (check_status(*msg, status_code) != 0) {
+   if (asprintf(&line, "%s.%s", CRLF, CRLF) == -1) {
       return -1;
+   }
+   if (ref->out) {
+      fprintf(ref->out, "C: .\r\n");
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int smtp_quit(SMTP smtp) {
+   errno = 0;
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
+   char* line;
+   if (asprintf(&line, "QUIT%s", CRLF) == -1) {
+      return -1;
+   }
+   if (ref->out) {
+      fprintf(ref->out, "C: %s", line);
+   }
+   int ret = smtp_write_line(smtp, line);
+   free(line);
+   return ret;
+}
+
+int check_code(char* line, char* code) {
+   size_t line_len = strlen(line);
+   size_t status_len = strlen(code);
+   if (line_len == 0 || status_len == 0 || line_len < status_len) {
+      return -1; // line cannot start with status
+   }
+   return strncmp(line, code, status_len);
+}
+
+int is_multi_line(char* line) {
+   if (strlen(line) >= 4 && line[3] == '-') {
+      return 1; // SMTP: 4th character being a `-` indicates multi line
    }
    return 0;
 }
 
-#define MULTI_LISTEN(ret, fd, read, code, msg, cond) \
-   do {                                              \
-      ret = smtp_listen(fd, read, code, &msg);       \
-      printf("S: %s", msg);                          \
-      cond = is_multi_line(msg);                     \
-      free(msg);                                     \
-      msg = 0;                                       \
-      if (ret) {                                     \
-         return 1;                                   \
-      }                                              \
-   } while (cond)
-
-int smtp_send_email(int fd, read_func read, write_func write, struct smtp_email* email) {
-   char* msg = 0;
+int smtp_listen(SMTP smtp, char* code) {
+   if (smtp == NULL) {
+      return -1;
+   }
+   SMTP_ref ref = (SMTP_ref)smtp;
    int ret;
-   int is_multi = 0;
-   MULTI_LISTEN(ret, fd, read, "220", msg, is_multi);
-   ret = smtp_helo(fd, write, email->helo_host, &msg);
-   printf("C: %s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "250", msg, is_multi);
-   ret = smtp_mail_from(fd, write, email->from, &msg);
-   printf("C: %s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "250", msg, is_multi);
-   ret = smtp_rcpt_to(fd, write, email->to, &msg);
-   printf("C: %s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "250", msg, is_multi);
-   ret = smtp_data(fd, write, &msg);
-   printf("C: %s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "354", msg, is_multi);
-   ret = smtp_data_body(fd, write, email->body, &msg);
-   printf("%s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "250", msg, is_multi);
-   ret = smtp_quit(fd, write, &msg);
-   printf("C: %s\n", msg);
-   free(msg);
-   msg = 0;
-   if (ret == -1) {
-      return -1;
-   }
-   MULTI_LISTEN(ret, fd, read, "221", msg, is_multi);
+   do {
+      char* line = 0;
+      ret = smtp_read_line(smtp, &line);
+      if (ret == -1) {
+         free(line); // Read faild
+         fprintf(ref->err, "STMP LISTEN: %s", strerror(errno));
+         return -1;
+      }
+      fprintf(ref->out, "S: %s", line);
+      if (check_code(line, code)) {
+         return -1; // Code does not match
+      }
+      ret = is_multi_line(line);
+      free(line);
+   } while (ret);
    return 0;
 }
-#undef MULTI_LISTEN
+
+int smtp_send_email(SMTP smtp) {
+   if (smtp == NULL) {
+      return -1;
+   }
+   if (smtp_listen(smtp, "220")) {
+      return -1;
+   }
+   if (smtp_helo(smtp) == -1) { // HELO
+      return -1;
+   }
+   if (smtp_listen(smtp, "250")) {
+      return -1;
+   }
+   if (smtp_mail_from(smtp) == -1) { // MAIL TO
+      return -1;
+   }
+   if (smtp_listen(smtp, "250")) {
+      return -1;
+   }
+   if (smtp_rcpt_to(smtp) == -1) { // RCPT TO
+      return -1;
+   }
+   if (smtp_listen(smtp, "250")) {
+      return -1;
+   }
+   if (smtp_data_start(smtp) == -1) { // DATA START
+      return -1;
+   }
+   if (smtp_listen(smtp, "354")) {
+      return -1;
+   }
+   if (smtp_data_body(smtp) == -1) { // DATA BODY
+      return -1;
+   }
+   if (smtp_data_end(smtp) == -1) { // DATA END
+      return -1;
+   }
+   if (smtp_listen(smtp, "250")) {
+      return -1;
+   }
+   if (smtp_quit(smtp) == -1) { // QUIT
+      return -1;
+   }
+   if (smtp_listen(smtp, "221")) {
+      return -1;
+   }
+   return 0;
+}

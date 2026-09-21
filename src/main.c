@@ -12,46 +12,38 @@
 #define main main_exclude
 #endif
 
-/** * @brief Prints the programs usage message.
- *
- * This function prints the programs usage message to stdout.
- * @return 0 on error
- */
-
-
-
 int main(int argc, char** argv) {
-   struct smtp_email options = { 0 }; // Initalize smtp_message
+   SMTP smtp = smtp_init(smtp_open, smtp_close, smtp_read, smtp_write, stdout, stderr);
+   if(smtp == NULL) {
+      fprintf(stderr, "Out of memory\n");
+   }
    /* Print usage for no opts */
    if (argc == 1) {
-      print_usage();
+      smtp_print_usage(smtp);
+      smtp_free(smtp);
       return 0;
    }
    /* Parse opts*/
-   int error_code = parse_cli(argc, argv, &options);
+   int error_code = smtp_get_opts(smtp, argc, argv);
    if (error_code) {
-      smtp_email_cleanup(&options);
-      fprintf(stderr, "Argument Error: %s\n", get_error_str(error_code));
+      fprintf(stderr, "Argument Error: %s\n", smtp_error(error_code));
+      smtp_free(smtp);
       return 1;
    }
-
-   /* Connect to mail server*/
-   char* error_str = 0;
-   int fd = smtp_connect(options.server, options.port, &error_str);
-   if(error_str){
-      smtp_email_cleanup(&options);
-      fprintf(stderr, "%s\n", error_str);
-      free(error_str);
+   /* Connect to SMTP server */
+   if(smtp_connect(smtp)) {
+      perror("smtp_connect");
+      smtp_free(smtp);
+      return 2;
+   } 
+   /* Send email */
+   if(smtp_send_email(smtp)) {
+      printf("Failed to send email\n");
+      smtp_disconnect(smtp);
+      smtp_free(smtp);
       return 2;
    }
-
-   if (smtp_send_email(fd, smtp_recv, smtp_send, &options) == 0) {
-      printf("Succeded in sending email\n");
-   } else {
-      printf("failed to send email\n");
-   }
-
-   close(fd);
-   smtp_email_cleanup(&options);
+   smtp_disconnect(smtp);
+   smtp_free(smtp);
    return 0;
 }
