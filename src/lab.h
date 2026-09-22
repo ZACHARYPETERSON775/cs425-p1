@@ -32,6 +32,27 @@ SMTP smtp_init(open_func open, close_func close, read_func read, write_func writ
  */
 void smtp_free(SMTP smtp);
 
+/** * @brief Set SMTP email data.
+ * 
+ * This function sets the SMTP handles email data.
+ * All strings are allocated using malloc and should be freed by the caller using smtp_free.
+ * The strings stored are copies.
+ * This function should only be called once as it blindly copies the strings.
+ * from, to, and server are required and an error will be returned if not set.
+ * helo_host defaults to `localhost`
+ * @param smpt SMTP handle.
+ * @param from Sender.
+ * @param to Recipient.
+ * @param subject Subject line.
+ * @param body Message body, default is read from stdin.
+ * @param port Server port.
+ * @param helo_host Name of server.
+ * @param server Server address.
+ * @return On success, returns 0.
+ * @return On error, returns SMTP error code.
+ */
+int smtp_set(SMTP smtp, char* from, char* to, char* subject, char* body, int port, char* helo_host, char* server);
+
 /** * @brief Default open method for SMTP.
  * 
  * This function opens a connect to a SMTP server.

@@ -24,7 +24,8 @@ enum SMTP_ERROR_CODE {
    MISSING_FROM,
    MISSING_TO,
    MISSING_SERVER,
-   EXTRA_FLAGS
+   EXTRA_FLAGS,
+   STDIN_ERROR
 };
 
 /* SMTP message contents*/
@@ -82,6 +83,54 @@ void smtp_free(SMTP smtp) {
    ref->helo_host = 0;
    ref->server = 0;
    free(smtp);
+}
+
+int smtp_set(SMTP smtp, char* from, char* to, char* subject, char* body, int port, char* helo_host, char* server) {
+  if (smtp == NULL) {
+    return NULL_PTR;
+  }
+  if (from == NULL) {
+    return MISSING_FROM;
+  }
+  if (to == NULL) {
+    return MISSING_TO;
+  }
+  if (server == NULL) {
+    return MISSING_SERVER;
+  }
+  if(port < 0) {
+    return BAD_PORT;
+  }
+  SMTP_ref ref = (SMTP_ref)smtp;
+  if ((ref->from = strdup(from)) == NULL) {
+    return MEM_ERROR;
+  }
+  if ((ref->to = strdup(to)) == NULL) {
+    return MEM_ERROR;
+  }
+  if (subject != NULL && (ref->subject = strdup(subject)) == NULL) {
+    return MEM_ERROR;
+  }
+  if(body == NULL) {
+    errno = 0;
+    scanf("%m[^EOF]", &ref->body);
+    if(errno) {
+      return STDIN_ERROR;
+    }
+  } else if ((ref->body = strdup(body)) == NULL) {
+    return MEM_ERROR;
+  }
+  ref->port = port;
+  if(helo_host == NULL) {
+    helo_host = "localhost";
+  }
+  if ((ref->helo_host = strdup(helo_host)) == NULL) {
+    return MEM_ERROR;
+  }
+  if ((ref->server = strdup(server)) == NULL) {
+    return MEM_ERROR;
+  }
+  return 0;
 }
 
 int smtp_open(const char* host, int port) {
@@ -158,121 +207,101 @@ int smtp_get_opts(SMTP smtp, int argc, char** argv) {
    if (smtp == NULL) {
       return NULL_PTR;
    }
-   SMTP_ref ref = (SMTP_ref)smtp;
+   char *from, *to, *subject, *body, *helo_host, *server;
+   from = to = subject = body = helo_host = server = NULL;
+   int port = 25;
+   int port_set = 0;
    int arg;
    while ((arg = getopt(argc, argv, "f:t:-s:-b:-p:-H:")) != -1) {
-      switch (arg) {
-      case 'f':
-         if (ref->from) {
+     switch (arg) {
+       case 'f':
+         if (from) {
+           return DUP_FLAG;
+         }
+         from = optarg;
+         break;
+       case 't':
+         if (to) {
+           return DUP_FLAG;
+         }
+         to = optarg;
+         break;
+       case 's':
+         if (subject) {
+           return DUP_FLAG;
+         }
+         subject = optarg;
+         break;
+       case 'b':
+         if (body) {
+           return DUP_FLAG;
+         }
+         body = optarg;
+         break;
+       case 'p':
+         if(port_set) {
             return DUP_FLAG;
          }
-         if ((ref->from = strdup(optarg)) == 0) {
-            return MEM_ERROR;
+         port_set = 1;
+         if ((port = atoi(optarg)) == 0) {
+           return BAD_PORT;
          }
          break;
-      case 't':
-         if (ref->to) {
-            return DUP_FLAG;
+       case 'H':
+         if (helo_host) {
+           return DUP_FLAG;
          }
-         if ((ref->to = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
+         helo_host = optarg;
          break;
-      case 's':
-         if (ref->subject) {
-            return DUP_FLAG;
-         }
-         if ((ref->subject = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 'b':
-         if (ref->body) {
-            return DUP_FLAG;
-         }
-         if ((ref->body = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      case 'p':
-         if (ref->port) {
-            return DUP_FLAG;
-         }
-         if ((ref->port = atoi(optarg)) == 0) {
-            return BAD_PORT;
-         }
-         break;
-      case 'H':
-         if (ref->helo_host) {
-            return DUP_FLAG;
-         }
-         if ((ref->helo_host = strdup(optarg)) == 0) {
-            return MEM_ERROR;
-         }
-         break;
-      default:
+       default:
          return UNKNOWN_FLAG;
-      }
+     }
    }
-   if (ref->from == 0) {
-      return MISSING_FROM;
-   } else if (ref->to == 0) {
-      return MISSING_TO;
-   } else if (optind >= argc) {
-      return MISSING_SERVER;
+   if (optind >= argc) {
+     return MISSING_SERVER;
    } else {
-      if ((ref->server = strdup(argv[optind++])) == NULL) {
-         return MEM_ERROR;
-      }
+     server = argv[optind++];
    }
    if (optind < argc) {
-      return EXTRA_FLAGS;
+     return EXTRA_FLAGS;
    }
    /* SET DEFAULTS*/
-   if (ref->helo_host == 0) {
-      if ((ref->helo_host = strdup("localhost")) == NULL) {
-         return MEM_ERROR;
-      }
-   }
-   if (ref->port == 0) {
-      ref->port = 25;
-   }
-   /* Read from stdin if body is not set */
-   if (ref->body == 0) {
-      scanf("%m[^EOF]", &ref->body);
-   }
-   return 0;
+   return smtp_set(smtp, from, to, subject, body, port, helo_host, server);
 }
 
 char* smtp_error(int error) {
-   switch (error) {
-   case NO_ERROR:
+  switch (error) {
+    case NO_ERROR:
       return "no error";
-   case NULL_PTR:
+    case NULL_PTR:
       return "Null ptr";
-   case DUP_FLAG:
+    case DUP_FLAG:
       return "duplicate flag";
-   case MEM_ERROR:
+    case MEM_ERROR:
       return "out of memory";
-   case BAD_PORT:
+    case BAD_PORT:
       return "bad port number";
-   case UNKNOWN_FLAG:
+    case UNKNOWN_FLAG:
       return "unknown flag";
-   case MISSING_FROM:
+    case MISSING_FROM:
       return "missing sender";
-   case MISSING_TO:
+    case MISSING_TO:
       return "missing recipient";
-   case MISSING_SERVER:
+    case MISSING_SERVER:
       return "missing mail server address";
-   default:
+    case EXTRA_FLAGS:
+      return "extra flags provided";
+    case STDIN_ERROR:
+      return "failed to read from stdin";
+    default:
       return "unknown error";
-   }
+  }
 }
 
 int smtp_connect(SMTP smtp) {
    errno = 0;
-   if (smtp == 0) {
-      return NULL_PTR;
+   if (smtp == NULL) {
+      return -1;
    }
    SMTP_ref ref = (SMTP_ref)smtp;
    if ((ref->sfd = ref->open(ref->server, ref->port)) == -1) {
